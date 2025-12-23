@@ -83,6 +83,66 @@ struct Segment {
     dr: DecodingResult,
 }
 
+const SILENCE_QUANTILE_LOW: f32 = 0.1;
+const SILENCE_QUANTILE_HIGH: f32 = 0.9;
+const SILENCE_THRESHOLD_RATIO: f32 = 0.1;
+const SILENCE_MIN_SECONDS: f32 = 1.0;
+
+struct SilenceScan {
+    is_silent: Vec<bool>,
+    min_silence_frames: usize,
+}
+
+impl SilenceScan {
+    fn from_mel(mel: &[f32], n_mel: usize, n_frames: usize) -> Self {
+        if n_mel == 0 || n_frames == 0 {
+            return Self {
+                is_silent: Vec::new(),
+                min_silence_frames: 0,
+            };
+        }
+        let mut frame_energy = vec![0f32; n_frames];
+        for mel_bin in 0..n_mel {
+            let row_offset = mel_bin * n_frames;
+            for i in 0..n_frames {
+                frame_energy[i] += mel[row_offset + i];
+            }
+        }
+        let inv_mel = 1.0 / n_mel as f32;
+        for energy in frame_energy.iter_mut() {
+            *energy *= inv_mel;
+        }
+        let mut sorted = frame_energy.clone();
+        sorted.sort_by(|a, b| a.total_cmp(b));
+        let p10 = percentile(&sorted, SILENCE_QUANTILE_LOW);
+        let p90 = percentile(&sorted, SILENCE_QUANTILE_HIGH);
+        let dynamic_range = (p90 - p10).max(1e-4);
+        let threshold = p10 + dynamic_range * SILENCE_THRESHOLD_RATIO;
+        let is_silent = frame_energy.iter().map(|&e| e <= threshold).collect();
+        let min_silence_frames =
+            ((SILENCE_MIN_SECONDS * m::SAMPLE_RATE as f32) / m::HOP_LENGTH as f32).round() as usize;
+        Self {
+            is_silent,
+            min_silence_frames: min_silence_frames.max(1),
+        }
+    }
+
+    fn skip_silence(&self, seek: usize) -> Option<usize> {
+        if seek >= self.is_silent.len() || !self.is_silent[seek] {
+            return None;
+        }
+        let mut end = seek;
+        while end < self.is_silent.len() && self.is_silent[end] {
+            end += 1;
+        }
+        if end - seek >= self.min_silence_frames {
+            Some(end)
+        } else {
+            None
+        }
+    }
+}
+
 struct Decoder {
     model: Model,
     rng: rand::rngs::StdRng,
@@ -99,6 +159,7 @@ struct Decoder {
     no_speech_token: u32,
     no_timestamps_token: u32,
     language_token: Option<u32>,
+    silence_scan: Option<SilenceScan>,
 }
 
 impl Decoder {
@@ -113,6 +174,7 @@ impl Decoder {
         timestamps: bool,
         max_initial_timestamp_index: Option<u32>,
         verbose: bool,
+        silence_scan: Option<SilenceScan>,
     ) -> Result<Self> {
         let no_timestamps_token = token_id(&tokenizer, m::NO_TIMESTAMPS_TOKEN)?;
         // Suppress the notimestamps token when in timestamps mode.
@@ -156,6 +218,7 @@ impl Decoder {
             no_speech_token,
             language_token,
             no_timestamps_token,
+            silence_scan,
         })
     }
 
@@ -436,6 +499,18 @@ impl Decoder {
         let mut seek = 0;
         let mut segments: Vec<Segment> = vec![];
         while seek < content_frames {
+            if let Some(scan) = &self.silence_scan {
+                if let Some(next_seek) = scan.skip_silence(seek) {
+                    if self.verbose {
+                        let skipped_frames = next_seek - seek;
+                        let skipped_s =
+                            skipped_frames as f64 * m::HOP_LENGTH as f64 / m::SAMPLE_RATE as f64;
+                        println!("skipping {:.2}s of silence", skipped_s);
+                    }
+                    seek = next_seek;
+                    continue;
+                }
+            }
             let start: std::time::Instant = std::time::Instant::now();
             let time_offset = (seek * m::HOP_LENGTH) as f64 / m::SAMPLE_RATE as f64;
             let segment_size = usize::min(content_frames - seek, m::N_FRAMES);
@@ -512,6 +587,14 @@ pub fn token_id(tokenizer: &Tokenizer, token: &str) -> candle_core::Result<u32> 
         None => candle_core::bail!("no token-id for {token}"),
         Some(id) => Ok(id),
     }
+}
+
+fn percentile(sorted: &[f32], pct: f32) -> f32 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let idx = ((sorted.len() - 1) as f32 * pct).round() as usize;
+    sorted[idx.min(sorted.len() - 1)]
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -718,11 +801,9 @@ fn main() -> Result<()> {
     println!("pcm data loaded {}", pcm_data.len());
     let mel = audio::pcm_to_mel(&config, &pcm_data, &mel_filters);
     let mel_len = mel.len();
-    let mel = Tensor::from_vec(
-        mel,
-        (1, config.num_mel_bins, mel_len / config.num_mel_bins),
-        &device,
-    )?;
+    let mel_frames = mel_len / config.num_mel_bins;
+    let silence_scan = SilenceScan::from_mel(&mel, config.num_mel_bins, mel_frames);
+    let mel = Tensor::from_vec(mel, (1, config.num_mel_bins, mel_frames), &device)?;
     println!("loaded mel: {:?}", mel.dims());
 
     let model = if args.quantized {
@@ -761,6 +842,7 @@ fn main() -> Result<()> {
         args.timestamps,
         args.max_initial_timestamp_index,
         args.verbose,
+        Some(silence_scan),
     )?;
     let segments = dc.run(&mel)?;
     std::fs::write(args.output, serde_json::to_string(&segments).unwrap()).unwrap();
