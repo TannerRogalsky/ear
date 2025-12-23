@@ -252,7 +252,7 @@ impl Decoder {
 
     fn decode_with_fallback(&mut self, segment: &Tensor) -> Result<DecodingResult> {
         for (i, &t) in m::TEMPERATURES.iter().enumerate() {
-            let dr: Result<DecodingResult> = self.decode(segment, t);
+            let dr = self.decode(segment, t);
             if i == m::TEMPERATURES.len() - 1 {
                 return dr;
             }
