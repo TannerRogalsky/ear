@@ -66,21 +66,21 @@ impl Model {
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize)]
-struct DecodingResult {
-    tokens: Vec<u32>,
-    text: String,
-    avg_logprob: f64,
-    no_speech_prob: f64,
-    temperature: f64,
-    compression_ratio: f64,
+pub struct DecodingResult {
+    pub tokens: Vec<u32>,
+    pub text: String,
+    pub avg_logprob: f64,
+    pub no_speech_prob: f64,
+    pub temperature: f64,
+    pub compression_ratio: f64,
 }
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize)]
-struct Segment {
-    start: f64,
-    duration: f64,
-    dr: DecodingResult,
+pub struct Segment {
+    pub start: f64,
+    pub duration: f64,
+    pub dr: DecodingResult,
 }
 
 const SILENCE_QUANTILE_LOW: f32 = 0.1;
@@ -146,7 +146,7 @@ impl SilenceScan {
 struct Decoder {
     model: Model,
     rng: rand::rngs::StdRng,
-    task: Option<Task>,
+    task: Task,
     timestamps: bool,
     max_initial_timestamp_index: Option<u32>,
     verbose: bool,
@@ -170,7 +170,7 @@ impl Decoder {
         seed: u64,
         device: &Device,
         language_token: Option<u32>,
-        task: Option<Task>,
+        task: Task,
         timestamps: bool,
         max_initial_timestamp_index: Option<u32>,
         verbose: bool,
@@ -179,7 +179,7 @@ impl Decoder {
         let no_timestamps_token = token_id(&tokenizer, m::NO_TIMESTAMPS_TOKEN)?;
         // Suppress the notimestamps token when in timestamps mode.
         // https://github.com/openai/whisper/blob/e8622f9afc4eba139bf796c210f5c01081000472/whisper/decoding.py#L452
-        let suppress_tokens: Vec<f32> = (0..model.config().vocab_size as u32)
+        let suppress_tokens = (0..model.config().vocab_size as u32)
             .map(|i| {
                 if model.config().suppress_tokens.contains(&i)
                     || timestamps && i == no_timestamps_token
@@ -189,7 +189,7 @@ impl Decoder {
                     0f32
                 }
             })
-            .collect();
+            .collect::<Vec<_>>();
         let suppress_tokens = Tensor::new(suppress_tokens.as_slice(), device)?;
         let sot_token = token_id(&tokenizer, m::SOT_TOKEN)?;
         let transcribe_token = token_id(&tokenizer, m::TRANSCRIBE_TOKEN)?;
@@ -235,8 +235,8 @@ impl Decoder {
             tokens.push(language_token);
         }
         match self.task {
-            None | Some(Task::Transcribe) => tokens.push(self.transcribe_token),
-            Some(Task::Translate) => tokens.push(self.translate_token),
+            Task::Transcribe => tokens.push(self.transcribe_token),
+            Task::Translate => tokens.push(self.translate_token),
         }
         if !self.timestamps {
             tokens.push(self.no_timestamps_token);
@@ -343,11 +343,7 @@ impl Decoder {
 
         // ========== SETUP: Extract sampled tokens for analysis ==========
         let sample_begin = if self.language_token.is_some() { 3 } else { 2 };
-        let sampled_tokens = if tokens.len() > sample_begin {
-            &tokens[sample_begin..]
-        } else {
-            &[]
-        };
+        let sampled_tokens = tokens.get(sample_begin..).unwrap_or_default();
 
         let mut masks = Vec::new();
         // Pre-allocate reusable mask buffer to avoid repeated allocations
@@ -597,14 +593,24 @@ fn percentile(sorted: &[f32], pct: f32) -> f32 {
     sorted[idx.min(sorted.len() - 1)]
 }
 
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum Task {
+#[derive(Clone, Copy, Debug, ValueEnum, Default)]
+pub enum Task {
+    #[default]
     Transcribe,
     Translate,
 }
 
+impl std::fmt::Display for Task {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transcribe => write!(f, "transcribe"),
+            Self::Translate => write!(f, "translate"),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-enum WhichModel {
+pub enum WhichModel {
     Tiny,
     #[value(name = "tiny.en")]
     TinyEn,
@@ -669,77 +675,112 @@ impl WhichModel {
     }
 }
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
-struct Args {
+pub struct Args {
     /// Run on CPU rather than on GPU.
     #[arg(long)]
-    cpu: bool,
+    pub cpu: bool,
 
     #[arg(long)]
-    model_id: Option<String>,
+    pub model_id: Option<String>,
 
     /// The model to use, check out available models:
     /// https://huggingface.co/models?search=whisper
     #[arg(long)]
-    revision: Option<String>,
+    pub revision: Option<String>,
 
     /// The model to be used, can be tiny, small, medium.
     #[arg(long, default_value = "tiny.en")]
-    model: WhichModel,
+    pub model: WhichModel,
 
     /// The input to be processed
     #[arg(long)]
-    input: PathBuf,
+    pub input: PathBuf,
 
     /// The seed to use when generating random samples.
     #[arg(long, default_value_t = 299792458)]
-    seed: u64,
+    pub seed: u64,
 
     /// Enable tracing (generates a trace-timestamp.json file).
     #[arg(long)]
-    tracing: bool,
+    pub tracing: bool,
 
     #[arg(long)]
-    quantized: bool,
+    pub quantized: bool,
 
     /// Language.
     #[arg(long)]
-    language: Option<String>,
+    pub language: Option<String>,
 
     /// Task, when no task is specified, the input tokens contain only the sot token which can
     /// improve things when in no-timestamp mode.
-    #[arg(long)]
-    task: Option<Task>,
+    #[arg(long, default_value_t = Task::Transcribe)]
+    pub task: Task,
 
     /// Timestamps mode.
     #[arg(long, default_value_t = true)]
-    timestamps: bool,
+    pub timestamps: bool,
 
     /// Maximum initial timestamp index to consider.
     #[arg(long)]
-    max_initial_timestamp_index: Option<u32>,
+    pub max_initial_timestamp_index: Option<u32>,
 
     /// Print the full DecodingResult structure rather than just the text.
     #[arg(long)]
-    verbose: bool,
+    pub verbose: bool,
 
     #[arg(long)]
-    output: PathBuf,
+    pub output: PathBuf,
 }
 
-fn main() -> Result<()> {
-    use tracing_chrome::ChromeLayerBuilder;
+impl Default for Args {
+    fn default() -> Self {
+        Self {
+            cpu: false,
+            model_id: None,
+            revision: None,
+            model: WhichModel::TinyEn,
+            input: PathBuf::new(),
+            seed: 299792458,
+            tracing: false,
+            quantized: false,
+            language: None,
+            task: Task::default(),
+            timestamps: true,
+            max_initial_timestamp_index: None,
+            verbose: false,
+            output: PathBuf::new(),
+        }
+    }
+}
+
+impl Args {
+    pub fn for_input_output(input: PathBuf, output: PathBuf) -> Self {
+        Self {
+            input,
+            output,
+            ..Self::default()
+        }
+    }
+}
+
+fn setup_tracing(enabled: bool) -> Option<tracing_chrome::FlushGuard> {
+    if !enabled {
+        return None;
+    }
     use tracing_subscriber::prelude::*;
 
-    let args = Args::parse();
-    let _guard = if args.tracing {
-        let (chrome_layer, guard) = ChromeLayerBuilder::new().build();
-        tracing_subscriber::registry().with(chrome_layer).init();
-        Some(guard)
-    } else {
-        None
-    };
+    let (chrome_layer, guard) = tracing_chrome::ChromeLayerBuilder::new().build();
+    let init = tracing_subscriber::registry()
+        .with(chrome_layer)
+        .try_init()
+        .is_ok();
+    if init { Some(guard) } else { None }
+}
+
+pub fn transcribe(args: &Args) -> Result<Vec<Segment>> {
+    let _guard = setup_tracing(args.tracing);
     let device = device(args.cpu)?;
     println!("using device: {:?}", device);
     let (default_model, default_revision) = if args.quantized {
@@ -749,17 +790,18 @@ fn main() -> Result<()> {
     };
     let default_model = default_model.to_string();
     let default_revision = default_revision.to_string();
-    let (model_id, revision) = match (args.model_id, args.revision) {
-        (Some(model_id), Some(revision)) => (model_id, revision),
-        (Some(model_id), None) => (model_id, "main".to_string()),
-        (None, Some(revision)) => (default_model, revision),
+    let (model_id, revision) = match (args.model_id.as_ref(), args.revision.as_ref()) {
+        (Some(model_id), Some(revision)) => (model_id.to_string(), revision.to_string()),
+        (Some(model_id), None) => (model_id.to_string(), "main".to_string()),
+        (None, Some(revision)) => (default_model, revision.to_string()),
         (None, None) => (default_model, default_revision),
     };
+    println!("model id: {model_id}, revision: {revision}");
 
     let (config_filename, tokenizer_filename, weights_filename, input) = {
         let api = Api::new()?;
         let repo = api.repo(Repo::with_revision(model_id, RepoType::Model, revision));
-        let sample = args.input;
+        let sample = args.input.clone();
         let (config, tokenizer, model) = if args.quantized {
             let ext = match args.model {
                 WhichModel::TinyEn => "tiny-en",
@@ -777,6 +819,7 @@ fn main() -> Result<()> {
             let model = repo.get("model.safetensors")?;
             (config, tokenizer, model)
         };
+        println!("model: {}, sample: {:?}", model.to_string_lossy(), sample);
         (config, tokenizer, model, sample)
     };
     let config: Config = serde_json::from_str(&std::fs::read_to_string(config_filename)?)?;
@@ -818,7 +861,7 @@ fn main() -> Result<()> {
         Model::Normal(m::model::Whisper::load(&vb, config)?)
     };
 
-    let language_token = match (args.model.is_multilingual(), args.language) {
+    let language_token = match (args.model.is_multilingual(), args.language.as_deref()) {
         (true, None) => {
             unimplemented!()
             // Some(multilingual::detect_language(&mut model, &tokenizer, &mel)?),
@@ -829,7 +872,8 @@ fn main() -> Result<()> {
             Err(_) => anyhow::bail!("language {language} is not supported"),
         },
         (false, Some(_)) => {
-            anyhow::bail!("a language cannot be set for non-multilingual models")
+            println!("Using default language for non-multilingual model");
+            None
         }
     };
     let mut dc = Decoder::new(
@@ -845,8 +889,7 @@ fn main() -> Result<()> {
         Some(silence_scan),
     )?;
     let segments = dc.run(&mel)?;
-    std::fs::write(args.output, serde_json::to_string(&segments).unwrap()).unwrap();
-    Ok(())
+    Ok(segments)
 }
 
 pub fn pcm_decode<P: AsRef<std::path::Path>>(path: P) -> Result<(Vec<f32>, u32)> {

@@ -1,7 +1,20 @@
 [workspace]
-members = ["./crates/*"]
+members = [".", "./crates/*"]
 resolver = "3"
 
 [workspace.dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+anyhow = "1.0"
+
+[package]
+name = "ear"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+whisper = { path = "./crates/whisper" }
+stitch = { path = "./crates/stitch" }
